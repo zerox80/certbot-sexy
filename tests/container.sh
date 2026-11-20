@@ -27,10 +27,11 @@ if command -v apt-get >/dev/null; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 openssl bsdutils >/dev/null
 elif command -v dnf >/dev/null; then
-  dnf install -y -q python3 openssl util-linux >/dev/null
+  dnf install -y -q python3 openssl util-linux findutils >/dev/null
   dnf install -y -q util-linux-script >/dev/null 2>&1 || true
 elif command -v zypper >/dev/null; then
-  zypper -n -q install python3 openssl util-linux >/dev/null
+  # Nur für die Testwerkzeuge (find); das Skript selbst braucht weder find noch awk.
+  zypper -n -q install python3 openssl util-linux findutils >/dev/null
 fi
 python3 /src/tests/cloudflare-attrappe.py 8765 &
 install -m 755 /src/tests/certbot-attrappe.sh /usr/local/sbin/certbot

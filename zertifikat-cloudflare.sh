@@ -159,13 +159,28 @@ ask_token() {
   done
   token="$t"
 }
-# Wert aus einer certbot-Renewal-Datei: conf_value DATEI SCHLÜSSEL
-conf_value() { awk -v k="$2" -F' *= *' '$1 == k { sub(/^[^=]*= */, ""); print; exit }' "$1" 2>/dev/null || true; }
+# Wert aus einer certbot-Renewal- oder Token-Datei: conf_value DATEI SCHLÜSSEL
+# Reines bash – minimale Systeme (z. B. openSUSE Tumbleweed) haben kein awk.
+conf_value() {
+  local line val
+  [[ -r "$1" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*([^=[:space:]]+)[[:space:]]*=[[:space:]]*(.*)$ && "${BASH_REMATCH[1]}" == "$2" ]]; then
+      val="${BASH_REMATCH[2]}"
+      printf '%s' "${val%"${val##*[![:space:]]}"}"
+      return 0
+    fi
+  done <"$1"
+}
 token_from_file() {
   [[ -r "$1" ]] || fail "Token-Datei $1 ist nicht lesbar."
-  local t
+  local t line
   t="$(conf_value "$1" dns_cloudflare_api_token)"
-  [[ -n "$t" ]] || t="$(grep -m 1 -v -E '^[[:space:]]*(#|$)' "$1" || true)"
+  if [[ -z "$t" ]]; then # nur der Token: erste Zeile, die kein Kommentar ist
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ ! "$line" =~ ^[[:space:]]*(#|$) ]]; then t="$line"; break; fi
+    done <"$1"
+  fi
   printf '%s' "${t//[[:space:]]/}"
 }
 unit_exists() {
@@ -199,7 +214,14 @@ check_domains() {
   (( ! bad && ${#domains[@]} > 0 ))
 }
 cert_domains() { # Domains eines vorhandenen Zertifikats laut certbot
-  certbot certificates --cert-name "$1" 2>/dev/null | awk -F': *' '/Domains:/ { print $2; exit }' | tr ' ' '\n' | sed '/^$/d'
+  local line list=()
+  while IFS= read -r line; do
+    if [[ "$line" =~ Domains:[[:space:]]*(.*)$ ]]; then
+      read -r -a list <<<"${BASH_REMATCH[1]}"
+      if (( ${#list[@]} )); then printf '%s\n' "${list[@]}"; fi
+      return 0
+    fi
+  done < <(certbot certificates --cert-name "$1" 2>/dev/null)
 }
 next_run() {
   local n
@@ -693,7 +715,8 @@ obtain() {
   # 7. Ergebnis
   local live="$LE_DIR/live/$cert_name" end=""
   if command -v openssl >/dev/null 2>&1 && [[ -r "$live/cert.pem" ]]; then
-    end="$(openssl x509 -enddate -noout -in "$live/cert.pem" | cut -d= -f2)"
+    end="$(openssl x509 -enddate -noout -in "$live/cert.pem")"
+    end="${end#*=}"
     end="$(date -d "$end" '+%d.%m.%Y %H:%M' 2>/dev/null || printf '%s' "$end")"
   fi
   say "Fertig"
