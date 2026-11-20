@@ -9,6 +9,9 @@ GUT2=test_token_zweiter_mit_schreibrecht_42
 NUR_LESEN=test_token_nur_lesen_0123456789abcdef
 export ZC_TEST_API=http://127.0.0.1:8765/client/v4
 unset CLOUDFLARE_API_TOKEN
+# Gesucht wird der wörtliche Text der empfohlenen Startzeile (keine Ersetzung gewollt)
+# shellcheck disable=SC2016
+START_LITERAL='sudo bash -c "$(curl -fsSL'
 
 step() { printf '\n---- %s\n' "$*"; }
 must_fail() { # erwartete Meldung, Befehl …
@@ -79,6 +82,10 @@ base=(certonly --non-interactive --agree-tos --authenticator dns-cloudflare
 parses "${base[@]}" --register-unsafely-without-email --keep-until-expiring --dry-run --deploy-hook true
 parses "${base[@]}" -m test@example.org --force-renewal --dry-run
 parses renew --dry-run --no-random-sleep-on-renew --cert-name gibtsnicht
+# certbot lehnt Hooks ab, deren erstes Wort kein Programm ist – darauf baut detect_reload
+"$real" "${base[@]}" --register-unsafely-without-email --dry-run --deploy-hook 'if true; then :; fi' \
+  --server http://127.0.0.1:9/directory >/tmp/hook 2>&1 || true
+grep -q "Unable to find deploy-hook command" /tmp/hook || { cat /tmp/hook; echo "FEHLER: certbot prüft Hooks anders als erwartet"; exit 1; }
 "$real" --help all 2>&1 | grep -q -- "--test-cert" || { echo "FEHLER: certbot kennt --test-cert nicht"; exit 1; }
 certbot plugins --prepare 2>/dev/null | grep -q dns-cloudflare
 echo "ok: $(certbot --version 2>&1)"
@@ -124,9 +131,17 @@ echo "ok"
 step "Webserver wird erkannt und nach der Erneuerung neu geladen"
 mkdir -p /etc/systemd/system
 printf '[Service]\nExecStart=/bin/true\n' >/etc/systemd/system/nginx.service
+stub=""
+if ! type -P systemctl >/dev/null; then # Container ohne systemd: Platzhalter, damit der Hook gültig ist
+  stub=/usr/local/bin/systemctl
+  printf '#!/bin/sh\nexit 0\n' >"$stub" && chmod 755 "$stub"
+fi
 CLOUDFLARE_API_TOKEN=$GUT bash "$script" -d example.org -n mitnginx --yes </dev/null >/tmp/lauf5 2>&1 || { cat /tmp/lauf5; exit 1; }
-grep -qx 'renew_hook = if systemctl is-active --quiet nginx; then systemctl reload nginx; fi' /etc/letsencrypt/renewal/mitnginx.conf
+# certbot verlangt, dass das erste Wort des Hooks ein Programm ist (kein "if …; fi")
+grep -qx 'renew_hook = systemctl try-reload-or-restart nginx' /etc/letsencrypt/renewal/mitnginx.conf
 rm /etc/systemd/system/nginx.service
+if [[ -n "$stub" ]]; then rm -f "$stub"; fi
+must_fail "muss mit einem Programm beginnen" env CLOUDFLARE_API_TOKEN=$GUT bash "$script" -d example.org -n hook --reload 'if true; then :; fi' --yes
 echo "ok"
 
 step "Token ersetzen"
@@ -174,11 +189,36 @@ if command -v script >/dev/null; then
   tr -d '\r' </tmp/fragen | grep -q "lehnt den Token ab" || { cat /tmp/fragen; echo "FEHLER: falscher Token nicht gemeldet"; exit 1; }
   [[ -f /etc/letsencrypt/renewal/zweiter.example.org.conf ]] || { cat /tmp/fragen; echo "FEHLER: zweiter Versuch nicht übernommen"; exit 1; }
   echo "ok: falscher Token erkannt, zweiter Versuch übernommen"
-  # Wie "curl … | sudo bash": stdin ist das Skript, die Antworten kommen über /dev/tty
-  feed curl.example.org "$GUT" "" "" j | script -qec "bash -s <$script" /dev/null >/tmp/fragen 2>&1 || true
-  [[ -f /etc/letsencrypt/renewal/curl.example.org.conf ]] || { cat /tmp/fragen; echo "FEHLER: Fragen über /dev/tty klappen nicht"; exit 1; }
+  # Empfohlener Start: bash -c "$(curl …)" – stdin bleibt das Terminal
+  feed curl.example.org "$GUT" "" "" j | script -qec "bash -c \"\$(cat $script)\"" /dev/null >/tmp/fragen 2>&1 || true
+  [[ -f /etc/letsencrypt/renewal/curl.example.org.conf ]] || { cat /tmp/fragen; echo "FEHLER: bash -c mit Fragen klappt nicht"; exit 1; }
   no_token_in /tmp/fragen
-  echo "ok: Fragen funktionieren auch bei curl … | bash"
+  echo "ok: Fragen funktionieren mit bash -c \"\$(curl …)\""
+  # "curl … | bash" ohne Optionen: kein Hängen, sondern sofort die richtige Startzeile
+  feed pipe.example.org | timeout 60 script -qec "bash -s <$script" /dev/null >/tmp/fragen 2>&1 || true
+  tr -d '\r' </tmp/fragen | grep -qF "$START_LITERAL" || { cat /tmp/fragen; echo "FEHLER: kein Hinweis bei curl | bash"; exit 1; }
+  echo "ok: curl … | bash ohne Optionen nennt den richtigen Aufruf"
+  # Eingabe endet mitten in der Fragerunde: sauber abbrechen statt endlos fragen
+  feed eof.example.org | timeout 60 script -qec "bash $script" /dev/null >/tmp/fragen 2>&1 || true
+  tr -d '\r' </tmp/fragen | grep -q "Keine Eingabe mehr" || { cat /tmp/fragen; echo "FEHLER: kein Abbruch bei Eingabeende"; exit 1; }
+  [[ ! -e /etc/letsencrypt/renewal/eof.example.org.conf ]]
+  echo "ok: Eingabeende bricht ab"
+
+  # Wie auf dem Server: als normaler Benutzer mit sudo (Ubuntu/Debian: Defaults use_pty)
+  if command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null 2>&1; then
+    step "Start mit sudo wie auf dem Server (use_pty)"
+    id -u pruefer >/dev/null 2>&1 || useradd -m pruefer
+    echo 'pruefer ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/pruefer && chmod 440 /etc/sudoers.d/pruefer
+    grep -q use_pty /etc/sudoers && echo "    (sudo nutzt use_pty)"
+    # sudo setzt die Umgebung zurück – ohne ZC_TEST_API ginge es zu Cloudflare. Geprüft wird
+    # deshalb nur, dass die Eingabe ankommt (Token-Abfrage erscheint) und das Ende sauber ist.
+    feed sudo.example.org | timeout 90 su pruefer -c "script -qec 'sudo bash -c \"\$(cat $script)\"' /dev/null" >/tmp/sudo1 2>&1 || true
+    tr -d '\r' </tmp/sudo1 | grep -q "Token:" || { cat /tmp/sudo1; echo "FEHLER: Eingabe kommt unter sudo nicht an"; exit 1; }
+    echo "ok: sudo bash -c \"\$(curl …)\" – Eingaben kommen an"
+    feed sudo.example.org | timeout 90 su pruefer -c "script -qec 'cat $script | sudo bash' /dev/null" >/tmp/sudo2 2>&1 || true
+    tr -d '\r' </tmp/sudo2 | grep -qF "$START_LITERAL" || { cat /tmp/sudo2; echo "FEHLER: curl | sudo bash hängt oder schweigt"; exit 1; }
+    echo "ok: curl … | sudo bash hängt nicht, sondern nennt den richtigen Aufruf"
+  fi
 fi
 
 echo ""

@@ -8,11 +8,17 @@ interne Server, Server hinter einer Firewall und Wildcard-Zertifikate (`*.exampl
 ## Schnellstart
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh | sudo bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh)"
 ```
 
 Das Skript fragt nach den Domains und dem Cloudflare-API-Token (die Eingabe bleibt unsichtbar),
-zeigt eine Zusammenfassung und legt erst nach deiner Bestätigung los:
+zeigt eine Zusammenfassung und legt erst nach deiner Bestätigung los.
+
+> **Warum nicht `curl … | sudo bash`?** Dann ist die Eingabe des Skripts die Pipe von curl, nicht
+> die Tastatur. Unter Ubuntu und Debian startet `sudo` Befehle außerdem in einem eigenen Terminal
+> (`use_pty`), und Eingaben kommen dort gar nicht an. Für die Fragerunde deshalb immer
+> `sudo bash -c "$(curl …)"`. Ruft man es trotzdem per Pipe ohne Optionen auf, nennt das Skript
+> sofort den richtigen Befehl. Mit Optionen und `--yes` (ganz ohne Fragen) ist die Pipe in Ordnung.
 
 ```text
 ==> Zusammenfassung
@@ -22,7 +28,7 @@ zeigt eine Zusammenfassung und legt erst nach deiner Bestätigung los:
     Schlüssel:    ecdsa
     E-Mail:       ohne
     Token:        neu eingegeben
-    Danach:       if systemctl is-active --quiet nginx; then systemctl reload nginx; fi
+    Danach:       systemctl try-reload-or-restart nginx
 
     So ausführen? (j/n) [j]:
 ```
@@ -76,8 +82,13 @@ ein Token gespeichert, nimmt es diesen.
 
 ## Optionen
 
-Mit `curl … | sudo bash -s -- OPTIONEN` oder nach dem Herunterladen mit
-`sudo bash zertifikat-cloudflare.sh OPTIONEN`.
+Mit `curl … | sudo bash -s -- OPTIONEN` (ohne Fragen), mit
+`sudo bash -c "$(curl …)" _ OPTIONEN` (mit Fragen; das `_` ist ein Platzhalter für den
+Skriptnamen) oder nach dem Herunterladen mit `sudo bash zertifikat-cloudflare.sh OPTIONEN`.
+
+Der Befehl nach der Erneuerung (`--reload`) muss mit einem Programm beginnen – certbot prüft das
+und lehnt Shell-Konstrukte wie `if …; then …; fi` ab. Der Standard ist
+`systemctl try-reload-or-restart nginx`: lädt Nginx neu, wenn es läuft, sonst passiert nichts.
 
 | Option | Bedeutung |
 |---|---|

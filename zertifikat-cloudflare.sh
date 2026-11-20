@@ -2,9 +2,12 @@
 # zertifikat-cloudflare.sh – TLS-Zertifikat von Let's Encrypt über die DNS-Challenge (DNS-01)
 # bei Cloudflare holen und automatisch erneuern lassen.
 #
-#   curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh | sudo bash
-#   … | sudo bash -s -- -d example.org --yes     – ohne Fragen (Optionen siehe --help)
-#   … | sudo bash -s -- --status                 – Zertifikate und Erneuerung anzeigen
+#   Mit Fragen:
+#     sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh)"
+#   Ohne Fragen (Optionen siehe --help):
+#     curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh \
+#       | sudo bash -s -- -d example.org --token-file /root/cf-token --yes
+#   Zertifikate und Erneuerung anzeigen:  … | sudo bash -s -- --status
 #
 # Für Debian, Ubuntu, Fedora, Rocky/Alma Linux und openSUSE. Der Server braucht keinen offenen
 # Port 80 und muss von außen nicht erreichbar sein – geprüft wird nur ein TXT-Eintrag im DNS.
@@ -36,9 +39,13 @@ fail() { printf '\n%sFEHLER:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Aufruf: curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh | sudo bash
-        … | sudo bash -s -- -d DOMAIN [-d DOMAIN …] [Optionen] [--yes]
-        sudo bash zertifikat-cloudflare.sh [Optionen]      (heruntergeladene Datei)
+Aufruf mit Fragen:
+  sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh)"
+Ohne Fragen:
+  curl -fsSL https://raw.githubusercontent.com/zerox80/certbot-sexy/main/zertifikat-cloudflare.sh \
+    | sudo bash -s -- -d DOMAIN [-d DOMAIN …] [Optionen] --yes
+Heruntergeladene Datei:
+  sudo bash zertifikat-cloudflare.sh [Optionen]
 
 Zertifikat holen:
   -d, --domain NAME       Domain für das Zertifikat, mehrfach möglich, auch *.example.org.
@@ -113,18 +120,22 @@ self_cmd() {
   if [[ -f "$0" && "$0" == *.sh ]]; then printf 'sudo bash %s %s' "$0" "$*"
   else printf 'curl -fsSL %s | sudo bash -s -- %s' "$RAW_URL" "$*"; fi
 }
+START_HINT="sudo bash -c \"\$(curl -fsSL $RAW_URL)\""
 
-# Eingaben kommen vom Terminal. Bei "curl … | sudo bash" ist stdin das Skript selbst,
-# deshalb dann direkt von /dev/tty lesen. Ohne Terminal (Automatisierung, Tests) gibt es
-# keine Rückfragen, es gelten nur die Optionen.
-TTY="" interactive=0
+# Rückfragen nur, wenn stdin und stdout ein Terminal sind. Bei "curl … | sudo bash" ist stdin
+# das Skript selbst; von /dev/tty zu lesen klappt dort nicht zuverlässig (sudo mit use_pty,
+# Standard unter Ubuntu, reicht die Tastatur dann nicht weiter). Für die Fragerunde deshalb
+# mit  sudo bash -c "$(curl …)"  starten; ohne Terminal gelten nur die Optionen.
+interactive=0
 detect_terminal() {
-  if [[ -t 1 ]]; then
-    if [[ -t 0 ]]; then TTY=/dev/stdin
-    elif { : </dev/tty; } 2>/dev/null; then TTY=/dev/tty
-    fi
-  fi
-  if [[ -n "$TTY" ]]; then interactive=1; fi
+  if [[ -t 0 && -t 1 ]]; then interactive=1; fi
+}
+# Eingabe beendet (Strg+D, Verbindung weg): sauber abbrechen statt endlos weiterzufragen.
+# Läuft oft in einer Befehlsersetzung – deshalb das Hauptskript per Signal beenden.
+input_closed() {
+  printf '\n%sFEHLER:%s Keine Eingabe mehr – abgebrochen, nichts geändert.\n' "$R" "$N" >&2
+  kill -TERM "$$"
+  exit 1
 }
 os_ids=""
 detect_os() { # nur ID und ID_LIKE – /etc/os-release in einer Subshell lesen (setzt sonst VERSION u. a.)
@@ -138,7 +149,7 @@ detect_os() { # nur ID und ID_LIKE – /etc/os-release in einer Subshell lesen (
 ask() { # Frage, Vorschlag → Antwort (Vorschlag bei leerer Eingabe)
   local answer prompt="$1"
   [[ -n "${2:-}" ]] && prompt+=" [$2]"
-  read -r -p "    $prompt: " answer <"$TTY" || true
+  if ! read -r -p "    $prompt: " answer && [[ -z "${answer:-}" ]]; then input_closed; fi
   printf '%s' "${answer:-${2:-}}"
 }
 ask_yes() { # Frage, Vorschlag j/n
@@ -151,7 +162,7 @@ ask_token() {
   echo "    Anlegen: https://dash.cloudflare.com/profile/api-tokens → „Token erstellen“"
   echo "             → Vorlage „Edit zone DNS“ → Zonenressourcen: die Zone der Domain"
   while true; do
-    read -r -s -p "    Token: " t <"$TTY" || true
+    if ! read -r -s -p "    Token: " t && [[ -z "${t:-}" ]]; then echo ""; input_closed; fi
     echo ""
     t="${t//[[:space:]]/}"
     [[ ${#t} -ge 20 ]] && break
@@ -190,15 +201,25 @@ unit_exists() {
   done
   return 1
 }
-# Nach einer Erneuerung den Webserver neu laden – aber nur, wenn er läuft (sonst kein Fehler).
+# Nach einer Erneuerung den Webserver neu laden. "try-reload-or-restart" tut nichts, wenn er
+# gerade nicht läuft. Wichtig: certbot prüft, ob das erste Wort ein Programm im PATH ist –
+# Shell-Konstrukte wie "if …; then …; fi" lehnt es ab.
 detect_reload() {
   local s
+  type -P systemctl >/dev/null 2>&1 || return 0
   for s in nginx apache2 httpd haproxy; do
-    if unit_exists "$s" || command -v "$s" >/dev/null 2>&1; then
-      printf 'if systemctl is-active --quiet %s; then systemctl reload %s; fi' "$s" "$s"
+    if unit_exists "$s"; then
+      printf 'systemctl try-reload-or-restart %s' "$s"
       return
     fi
   done
+}
+# Ein eigener Befehl für --reload muss mit einem Programm beginnen, das certbot findet.
+check_reload_cmd() {
+  [[ -n "$reload_cmd" ]] || return 0
+  local first="${reload_cmd%%[[:space:]]*}"
+  type -P "$first" >/dev/null 2>&1 \
+    || fail "Der Befehl nach der Erneuerung muss mit einem Programm beginnen (gefunden: „$first“). Für Shell-Befehle: sh -c '…'"
 }
 check_domains() {
   local d re='^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$'
@@ -582,7 +603,11 @@ obtain() {
 
   # 1. Domains
   if (( ${#domains[@]} == 0 )); then
-    (( interactive )) || { usage >&2; fail "--domain fehlt (oder das Skript in einem Terminal starten, dann fragt es nach)."; }
+    if (( ! interactive )); then
+      usage >&2
+      fail "--domain fehlt. Für die Fragerunde so starten (bei „curl … | sudo bash“ kommen keine Eingaben an):
+       $START_HINT"
+    fi
     say "Ein paar Fragen – geändert wird erst nach deiner Bestätigung (Vorschlag mit Enter übernehmen)"
     local suggestion
     suggestion="$(hostname -f 2>/dev/null || true)"
@@ -644,11 +669,16 @@ obtain() {
   if (( ! reload_given )); then
     reload_cmd="$(detect_reload)"
     if (( interactive )); then
-      local a
-      a="$(ask "Nach jeder Erneuerung ausführen ('-' = nichts)" "${reload_cmd:--}")"
-      if [[ "$a" == "-" ]]; then reload_cmd=""; else reload_cmd="$a"; fi
+      local a suggested="$reload_cmd"
+      while true; do
+        a="$(ask "Nach jeder Erneuerung ausführen ('-' = nichts)" "${suggested:--}")"
+        if [[ "$a" == "-" ]]; then reload_cmd=""; else reload_cmd="$a"; fi
+        [[ -z "$reload_cmd" ]] || type -P "${reload_cmd%%[[:space:]]*}" >/dev/null 2>&1 && break
+        warn "„${reload_cmd%%[[:space:]]*}“ ist kein Programm – certbot würde den Befehl ablehnen. Für Shell-Befehle: sh -c '…'"
+      done
     fi
   fi
+  check_reload_cmd
   if (( existing && ! force )) && [[ -n "$reload_cmd" && "$reload_cmd" != "$old_hook" ]]; then
     warn "Der Befehl nach der Erneuerung weicht vom gespeicherten ab – er wird erst mit --force übernommen."
   fi

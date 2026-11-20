@@ -29,6 +29,10 @@ case "${1:-}" in
       esac
     done
     [[ "$auth" == dns-cloudflare ]] || { echo "Attrappe: falscher Authenticator '$auth'" >&2; exit 1; }
+    # Wie das echte certbot: das erste Wort des Hooks muss ein Programm im PATH sein
+    if [[ -n "$hook" ]] && ! type -P "${hook%%[[:space:]]*}" >/dev/null; then
+      echo "Unable to find deploy-hook command ${hook%%[[:space:]]*} in the PATH." >&2; exit 1
+    fi
     [[ "$(stat -c %a "$cred")" == 600 ]] || { echo "Attrappe: Token-Datei ist nicht 600" >&2; exit 1; }
     grep -q '^dns_cloudflare_api_token = ' "$cred" || { echo "Attrappe: Token fehlt in $cred" >&2; exit 1; }
     if (( dry )); then echo "The dry run was successful."; exit 0; fi
