@@ -59,17 +59,26 @@ grep -q -- '-d www.example.org' /tmp/certbot-aufrufe || { echo "FEHLER: Domain n
 grep -q 'Fertig' /tmp/lauf1
 echo "ok: Zertifikat, Token-Datei (600, root) und Erneuerung eingerichtet"
 
-step "Das echte certbot kennt alle Optionen, die das Skript benutzt"
-certbot --help all >/tmp/hilfe 2>&1
-for opt in --dns-cloudflare-credentials --dns-cloudflare-propagation-seconds --key-type \
-           --keep-until-expiring --expand --deploy-hook --register-unsafely-without-email \
-           --cert-name --test-cert --force-renewal --dry-run; do
-  grep -q -- "$opt" /tmp/hilfe || { echo "FEHLER: certbot kennt $opt nicht"; exit 1; }
-done
-# --no-random-sleep-on-renew steht nicht in der Hilfe – deshalb echt aufrufen
+step "Das echte certbot nimmt alle Optionen an, die das Skript benutzt"
+# Manche Optionen stehen je nach Version nicht mehr in der Hilfe (z. B. certbot 5:
+# --register-unsafely-without-email), werden aber weiter angenommen. Deshalb das echte certbot
+# genau so aufrufen wie das Skript – gegen einen nicht erreichbaren ACME-Server, damit nichts
+# nach außen geht. Unbekannte Optionen meldet certbot vorher mit "unrecognized arguments".
 for real in /usr/bin/certbot /opt/certbot/bin/certbot; do [[ -x "$real" ]] && break; done
-"$real" renew --dry-run --no-random-sleep-on-renew --cert-name gibtsnicht >/tmp/schlaf 2>&1 || true
-if grep -q "unrecognized arguments" /tmp/schlaf; then cat /tmp/schlaf; echo "FEHLER: --no-random-sleep-on-renew unbekannt"; exit 1; fi
+parses() { # certbot-Argumente … → scheitert, wenn certbot sie nicht kennt
+  "$real" "$@" --server http://127.0.0.1:9/directory >/tmp/parse 2>&1 || true
+  if grep -qE "unrecognized arguments|error: argument|ambiguous option" /tmp/parse; then
+    cat /tmp/parse; echo "FEHLER: certbot $real lehnt Optionen ab: $*"; exit 1
+  fi
+}
+printf 'dns_cloudflare_api_token = %s\n' "$GUT" >/tmp/cf.ini && chmod 600 /tmp/cf.ini
+base=(certonly --non-interactive --agree-tos --authenticator dns-cloudflare
+  --dns-cloudflare-credentials /tmp/cf.ini --dns-cloudflare-propagation-seconds 30
+  --cert-name parse.example.org --key-type ecdsa --expand -d parse.example.org)
+parses "${base[@]}" --register-unsafely-without-email --keep-until-expiring --dry-run --deploy-hook true
+parses "${base[@]}" -m test@example.org --force-renewal --dry-run
+parses renew --dry-run --no-random-sleep-on-renew --cert-name gibtsnicht
+"$real" --help all 2>&1 | grep -q -- "--test-cert" || { echo "FEHLER: certbot kennt --test-cert nicht"; exit 1; }
 certbot plugins --prepare 2>/dev/null | grep -q dns-cloudflare
 echo "ok: $(certbot --version 2>&1)"
 
