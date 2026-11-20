@@ -1,0 +1,3 @@
+# Die Meldungen verwenden deutsche Anführungszeichen („…“) mit Absicht – SC1111 hält das
+# schließende “ für ein versehentlich getipptes Unicode-Anführungszeichen.
+disable=SC1111

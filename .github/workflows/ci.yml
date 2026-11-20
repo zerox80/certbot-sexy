@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -x zertifikat-cloudflare.sh tests/*.sh
+
+  server:
+    name: Server ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+          - debian:13
+          - fedora:latest
+          - rockylinux:9
+          - almalinux:9
+          - opensuse/leap:15.6
+          - opensuse/tumbleweed
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/src:ro" "${{ matrix.image }}" bash /src/tests/container.sh
+
+  e2e:
+    name: Ende-zu-Ende (Ubuntu mit systemd)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/e2e-ubuntu.sh

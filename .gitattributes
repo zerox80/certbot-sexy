@@ -1,0 +1,5 @@
+# Shell-Skripte immer mit LF – sonst bricht bash auf dem Server mit "$'\r': command not found" ab.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
